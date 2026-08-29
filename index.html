@@ -35,24 +35,33 @@
   header {
     width: 100%;
     max-width: 760px;
-    padding: 28px 20px 12px;
+    padding: 16px 20px 10px;
     text-align: center;
+    flex-shrink: 0;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg);
   }
   header h1 {
-    margin: 0 0 6px;
-    font-size: 1.6rem;
+    margin: 0;
+    font-size: 1.4rem;
     color: var(--accent-dark);
     letter-spacing: 0.02em;
   }
   header p {
-    margin: 0;
+    margin: 6px 0 0;
     color: var(--ink-soft);
-    font-size: 0.95rem;
+    font-size: 0.9rem;
+  }
+  header p.hidden {
+    display: none;
   }
   #chat-container {
     width: 100%;
     max-width: 760px;
     flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     background: var(--bg-panel);
@@ -66,9 +75,11 @@
     display: flex;
     gap: 8px;
     padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
+    border-top: 1px solid var(--border);
     background: #fbf6ea;
     flex-wrap: wrap;
+    flex-shrink: 0;
+    justify-content: center;
   }
   .toolbar-btn {
     background: var(--bg-panel);
@@ -84,13 +95,13 @@
   .toolbar-btn:disabled { opacity: 0.4; cursor: default; }
   #messages {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
     padding: 20px;
     display: flex;
     flex-direction: column;
     gap: 14px;
-    min-height: 300px;
-    max-height: 58vh;
   }
   .msg {
     max-width: 84%;
@@ -186,6 +197,7 @@
     padding: 14px;
     border-top: 1px solid var(--border);
     background: var(--bg-panel);
+    flex-shrink: 0;
   }
   #input-row textarea {
     flex: 1;
@@ -226,25 +238,37 @@
     font-size: 0.9rem;
     padding: 4px 4px;
   }
+
+  @media (max-width: 480px) {
+    header { padding: 12px 14px 8px; }
+    header h1 { font-size: 1.2rem; }
+    header p { font-size: 0.82rem; }
+    #chat-container { margin: 6px 8px 8px; border-radius: 10px; }
+    #messages { padding: 14px 12px; gap: 10px; }
+    .msg { max-width: 92%; font-size: 0.94rem; padding: 10px 13px; }
+    .user-turn, .options-row { max-width: 92%; }
+    .toolbar-btn { font-size: 0.76rem; padding: 6px 10px; }
+    #input-row { padding: 10px; }
+  }
 </style>
 </head>
 <body>
 
 <header>
   <h1>Aconselhamento Bíblico</h1>
-  <p>Escreva sua situação e você será ajudado(a) por meio do aconselhamento bíblico cristocêntrico.</p>
+  <p id="header-subtitle">Escreva sua situação e você será ajudado(a) por meio do aconselhamento bíblico cristocêntrico.</p>
 </header>
 
 <div id="chat-container">
-  <div id="toolbar">
-    <button id="restart-btn" class="toolbar-btn" title="Apagar tudo e começar uma nova conversa">🔄 Reiniciar</button>
-    <button id="whatsapp-btn" class="toolbar-btn" title="Enviar esta conversa pelo WhatsApp" disabled>🟢 Enviar por WhatsApp</button>
-    <button id="pdf-btn" class="toolbar-btn" title="Salvar esta conversa como PDF" disabled>🖨️ Salvar em PDF</button>
-  </div>
   <div id="messages"></div>
   <div id="input-row">
     <textarea id="user-input" placeholder="Escreva aqui o que você está enfrentando…" rows="2"></textarea>
     <button id="send-btn">Enviar</button>
+  </div>
+  <div id="toolbar">
+    <button id="restart-btn" class="toolbar-btn" title="Apagar tudo e começar uma nova conversa">🔄 Reiniciar</button>
+    <button id="whatsapp-btn" class="toolbar-btn" title="Enviar esta conversa pelo WhatsApp" disabled>🟢 Enviar por WhatsApp</button>
+    <button id="pdf-btn" class="toolbar-btn" title="Salvar esta conversa como PDF" disabled>🖨️ Salvar em PDF</button>
   </div>
 </div>
 
@@ -257,8 +281,10 @@
   // ============================
 
   const messagesEl = document.getElementById("messages");
+  const inputRowEl = document.getElementById("input-row");
   const inputEl = document.getElementById("user-input");
   const sendBtn = document.getElementById("send-btn");
+  const headerSubtitleEl = document.getElementById("header-subtitle");
   const restartBtn = document.getElementById("restart-btn");
   const whatsappBtn = document.getElementById("whatsapp-btn");
   const pdfBtn = document.getElementById("pdf-btn");
@@ -284,6 +310,14 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
+  // A caixa de digitação livre só aparece na primeira mensagem (para descrever a
+  // situação) e enquanto não houver botões de opção para responder. Depois disso,
+  // some, e a pessoa responde só pelos botões — a não ser que esteja editando uma
+  // resposta anterior, quando ela volta a aparecer.
+  function setInputRowVisible(visible) {
+    inputRowEl.style.display = visible ? "flex" : "none";
+  }
+
   function truncateFromInclusive(node) {
     let el = node;
     while (el) {
@@ -295,6 +329,7 @@
 
   function appendUserBubble(text, historyIndexBefore) {
     clearWelcomeNote();
+    headerSubtitleEl.classList.add("hidden");
 
     const wrapper = document.createElement("div");
     wrapper.className = "user-turn";
@@ -320,6 +355,7 @@
       inputEl.disabled = false;
       sendBtn.disabled = false;
       inputEl.value = text;
+      setInputRowVisible(true);
       inputEl.focus();
       updateExportButtonsState();
       if (!messagesEl.children.length) renderWelcome();
@@ -418,6 +454,20 @@
       });
       row.appendChild(btn);
     });
+
+    // Opção extra: voltar e mudar a resposta que levou a esta pergunta.
+    const backBtn = document.createElement("button");
+    backBtn.className = "option-btn";
+    backBtn.type = "button";
+    backBtn.textContent = "↩️ Voltar e mudar resposta anterior";
+    backBtn.addEventListener("click", () => {
+      const userTurns = messagesEl.querySelectorAll(".user-turn");
+      const lastUserTurn = userTurns[userTurns.length - 1];
+      const editBtn = lastUserTurn && lastUserTurn.querySelector(".edit-link");
+      if (editBtn) editBtn.click();
+    });
+    row.appendChild(backBtn);
+
     messagesEl.appendChild(row);
   }
 
@@ -469,11 +519,17 @@
       appendClosingRow();
       inputEl.disabled = true;
       sendBtn.disabled = true;
+      setInputRowVisible(false);
     } else {
       const { body, options } = extractOptions(text);
       div.innerHTML = renderMarkdown(body);
       messagesEl.appendChild(div);
-      if (options) appendOptionsRow(options);
+      if (options) {
+        appendOptionsRow(options);
+        setInputRowVisible(false);
+      } else {
+        setInputRowVisible(true);
+      }
     }
 
     scrollToBottom();
@@ -505,9 +561,11 @@
 
   function restartConversation() {
     history = [];
+    headerSubtitleEl.classList.remove("hidden");
     inputEl.value = "";
     inputEl.disabled = false;
     sendBtn.disabled = false;
+    setInputRowVisible(true);
     updateExportButtonsState();
     renderWelcome();
     inputEl.focus();
