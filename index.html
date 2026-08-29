@@ -666,14 +666,40 @@
     return t;
   }
 
+  // Para o WhatsApp, em vez da conversa inteira (que pode ficar longa demais e cortar),
+  // manda um resumo: a situação inicial, um resumo curto das respostas dadas ao longo do
+  // caminho, e a orientação final completa (o conteúdo mais importante para guardar).
+  function buildWhatsAppReportText() {
+    const exportable = buildExportableHistory();
+    const firstUserMsg = exportable.find((m) => m.role === "user");
+    const lastAssistantMsg = [...exportable].reverse().find((m) => m.role === "assistant");
+    const userAnswers = exportable.filter((m) => m.role === "user").slice(1);
+
+    let text = "*Registro de Aconselhamento Bíblico*\n" + new Date().toLocaleDateString("pt-BR") + "\n\n";
+
+    if (firstUserMsg) {
+      text += "*Situação relatada:*\n" + firstUserMsg.text + "\n\n";
+    }
+    if (userAnswers.length) {
+      text += "*Respostas ao longo da conversa:*\n";
+      userAnswers.forEach((m, i) => {
+        text += (i + 1) + ". " + m.text + "\n";
+      });
+      text += "\n";
+    }
+    if (lastAssistantMsg) {
+      text += "*Orientação final:*\n" + toWhatsAppFormatting(lastAssistantMsg.text);
+    }
+    return text;
+  }
+
   whatsappBtn.addEventListener("click", () => {
     if (!history.length) return;
-    const header = "*Registro de Aconselhamento Bíblico*\n" + new Date().toLocaleDateString("pt-BR") + "\n\n";
-    const full = header + toWhatsAppFormatting(buildTranscriptPlainText());
+    const full = buildWhatsAppReportText();
     const encoded = encodeURIComponent(full);
     if (encoded.length > 5500) {
       appendErrorNote(
-        "A conversa é longa — o WhatsApp pode abrir com o texto cortado. Para o registro completo, use 'Salvar em PDF'."
+        "A orientação final é longa — o WhatsApp pode abrir com o texto cortado. Para o registro completo, use 'Salvar em PDF'."
       );
     }
     window.open("https://wa.me/?text=" + encoded, "_blank");
