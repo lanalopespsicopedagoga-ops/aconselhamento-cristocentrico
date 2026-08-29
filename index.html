@@ -1,240 +1,643 @@
-/**
- * Cloudflare Worker — proxy seguro para o app "Aconselhamento Bíblico"
- *
- * O que este arquivo faz:
- *  - Recebe o histórico da conversa vindo do site (GitHub Pages)
- *  - Adiciona o "system prompt" (a personalidade/regras do conselheiro)
- *  - Chama a API do Google Gemini usando uma chave secreta guardada
- *    SOMENTE aqui no Worker (nunca aparece no código do site)
- *  - Devolve a resposta para o site
- *
- * Configuração necessária no painel da Cloudflare (Workers & Pages):
- *  1. Settings → Variables and Secrets → adicionar:
- *       GEMINI_API_KEY  = sua chave do Google AI Studio (marcar como "Secret")
- *       APP_SECRET      = uma senha qualquer que você inventar (marcar como "Secret")
- *  2. Trocar ALLOWED_ORIGIN abaixo pelo endereço do seu site no GitHub Pages
- *     depois que ele existir (ex: "https://seuusuario.github.io")
- */
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aconselhamento Bíblico</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f1e7;
+    --bg-panel: #fffdf8;
+    --ink: #2b2420;
+    --ink-soft: #6b5f52;
+    --accent: #7a3b2e;
+    --accent-dark: #5c2c22;
+    --user-bubble: #eadfc9;
+    --bot-bubble: #ffffff;
+    --border: #e2d6bd;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Georgia", "Iowan Old Style", serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  header {
+    width: 100%;
+    max-width: 760px;
+    padding: 28px 20px 12px;
+    text-align: center;
+  }
+  header h1 {
+    margin: 0 0 6px;
+    font-size: 1.6rem;
+    color: var(--accent-dark);
+    letter-spacing: 0.02em;
+  }
+  header p {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 0.95rem;
+  }
+  #chat-container {
+    width: 100%;
+    max-width: 760px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    margin: 10px 16px 16px;
+    overflow: hidden;
+    box-shadow: 0 4px 18px rgba(90, 60, 30, 0.08);
+  }
+  #toolbar {
+    display: flex;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: #fbf6ea;
+    flex-wrap: wrap;
+  }
+  .toolbar-btn {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    color: var(--ink);
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 0.82rem;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .toolbar-btn:hover:not(:disabled) { background: var(--user-bubble); }
+  .toolbar-btn:disabled { opacity: 0.4; cursor: default; }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 300px;
+    max-height: 58vh;
+  }
+  .msg {
+    max-width: 84%;
+    padding: 12px 16px;
+    border-radius: 14px;
+    line-height: 1.55;
+    font-size: 0.98rem;
+  }
+  .msg.user {
+    background: var(--user-bubble);
+    border-bottom-right-radius: 4px;
+    white-space: pre-wrap;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: var(--bot-bubble);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+  .msg.assistant p { margin: 0 0 10px; }
+  .msg.assistant p:last-child { margin-bottom: 0; }
+  .msg.assistant h1, .msg.assistant h2, .msg.assistant h3 {
+    color: var(--accent-dark);
+    margin: 14px 0 8px;
+    font-size: 1.05rem;
+  }
+  .msg.assistant h1:first-child, .msg.assistant h2:first-child, .msg.assistant h3:first-child { margin-top: 0; }
+  .msg.assistant strong { color: var(--accent-dark); }
+  .msg.assistant em { color: var(--ink); }
+  .msg.assistant ul, .msg.assistant ol { margin: 6px 0; padding-left: 22px; }
+  .msg.assistant li { margin-bottom: 4px; }
+  .msg.assistant hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+  .msg.error {
+    align-self: center;
+    background: #fbeaea;
+    border: 1px solid #e6b8b8;
+    color: #7a2e2e;
+    font-size: 0.9rem;
+    text-align: center;
+  }
+  .msg.system-note {
+    align-self: center;
+    color: var(--ink-soft);
+    font-style: italic;
+    font-size: 0.85rem;
+    background: none;
+    padding: 4px;
+    text-align: center;
+  }
+  .user-turn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    align-self: flex-end;
+    max-width: 84%;
+    gap: 3px;
+  }
+  .user-turn .msg.user { max-width: 100%; }
+  .edit-link {
+    background: none;
+    border: none;
+    color: var(--ink-soft);
+    font-size: 0.72rem;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 0 4px;
+    opacity: 0.65;
+  }
+  .edit-link:hover { opacity: 1; text-decoration: underline; }
+  .options-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-self: flex-start;
+    max-width: 84%;
+    margin-top: -6px;
+  }
+  .option-btn {
+    background: var(--bg-panel);
+    border: 1.5px solid var(--accent);
+    color: var(--accent-dark);
+    border-radius: 20px;
+    padding: 8px 16px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .option-btn:hover:not(:disabled) { background: var(--user-bubble); }
+  .option-btn:disabled { opacity: 0.4; cursor: default; }
+  #input-row {
+    display: flex;
+    gap: 10px;
+    padding: 14px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-panel);
+  }
+  #input-row textarea {
+    flex: 1;
+    resize: none;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-family: inherit;
+    font-size: 0.98rem;
+    min-height: 44px;
+    max-height: 140px;
+    background: #fffefb;
+    color: var(--ink);
+  }
+  #input-row textarea:focus {
+    outline: 2px solid var(--accent);
+  }
+  #input-row textarea:disabled {
+    background: #f1ede4;
+    color: var(--ink-soft);
+  }
+  #send-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 0 20px;
+    font-size: 0.95rem;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  #send-btn:hover:not(:disabled) { background: var(--accent-dark); }
+  #send-btn:disabled { opacity: 0.5; cursor: default; }
+  footer {
+    max-width: 760px;
+    padding: 10px 20px 24px;
+    text-align: center;
+    color: var(--ink-soft);
+    font-size: 0.78rem;
+  }
+  .typing {
+    align-self: flex-start;
+    color: var(--ink-soft);
+    font-style: italic;
+    font-size: 0.9rem;
+    padding: 4px 4px;
+  }
+</style>
+</head>
+<body>
 
-const ALLOWED_ORIGIN = "*"; // depois de publicar o site, troque por "https://seuusuario.github.io"
+<header>
+  <h1>Aconselhamento Bíblico</h1>
+  <p>Escreva sua situação e você será ajudado(a) por meio do aconselhamento bíblico cristocêntrico.</p>
+</header>
 
-// Tenta os modelos nesta ordem. Se um estiver "com alta demanda" (erro 503),
-// tenta o próximo automaticamente, sem precisar mexer no código de novo.
-const GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"];
+<div id="chat-container">
+  <div id="toolbar">
+    <button id="restart-btn" class="toolbar-btn" title="Apagar tudo e começar uma nova conversa">🔄 Reiniciar</button>
+    <button id="whatsapp-btn" class="toolbar-btn" title="Enviar esta conversa pelo WhatsApp" disabled>🟢 Enviar por WhatsApp</button>
+    <button id="pdf-btn" class="toolbar-btn" title="Salvar esta conversa como PDF" disabled>🖨️ Salvar em PDF</button>
+  </div>
+  <div id="messages"></div>
+  <div id="input-row">
+    <textarea id="user-input" placeholder="Escreva aqui o que você está enfrentando…" rows="2"></textarea>
+    <button id="send-btn">Enviar</button>
+  </div>
+</div>
 
-// Cada tentativa espera no máximo isso antes de desistir e tentar o próximo modelo.
-const PER_MODEL_TIMEOUT_MS = 5000;
+<footer>
+  Você pode reiniciar a conversa a qualquer momento pelo botão acima — nada fica salvo automaticamente
+  entre visitas. Este app é uma ferramenta de apoio e reflexão à luz das Escrituras. Ele não substitui o
+  acompanhamento pastoral presencial, aconselhamento profissional, nem atendimento em situações de crise
+  ou risco. Em emergência, procure ajuda imediata de um profissional (CVV 188) ou de sua igreja local.
+</footer>
 
-const SYSTEM_PROMPT = `║ SISTEMA: CONSELHEIRO BÍBLICO EXPERIENTE ║
-║ Protocolo de Aconselhamento Cristocêntrico e Noutético ║
-║ Frameworks de referência (conceitos, não texto literal): Gary Collins — "Christian Counseling" (modelo de 3 dimensões);
-║ John Broger / Biblical Counseling Foundation — metodologia de "Autoconfrontação" (Espiral Descendente/Ascendente);
-║ material de estudo sobre os "Disfarces do Orgulho" ║
+<script>
+  // ====== CONFIGURAÇÃO ======
+  const WORKER_URL = "https://aconselhamento-biblico.lana-lopes-psicopedagoga.workers.dev";
+  const APP_SECRET = "biblico2026";
+  const CLOSING_MARKER = "[CONVERSA_CONCLUIDA]";
+  // ============================
 
-NOTA DE ATRIBUIÇÃO (sempre respeitar): a estrutura usada aqui é INSPIRADA nas obras acima, reformulada com
-palavras próprias. Nunca cite, parafraseie de perto ou reproduza trechos literais dos manuais — eles são obras
-protegidas por direitos autorais. Quando fizer sentido, mencione a fonte pelo nome (ex.: "na linha da
-metodologia de Autoconfrontação, de John Broger/BCF") em vez de citar o texto do manual.
+  const messagesEl = document.getElementById("messages");
+  const inputEl = document.getElementById("user-input");
+  const sendBtn = document.getElementById("send-btn");
+  const restartBtn = document.getElementById("restart-btn");
+  const whatsappBtn = document.getElementById("whatsapp-btn");
+  const pdfBtn = document.getElementById("pdf-btn");
 
-BLOCO 0 — IDENTIDADE E MISSÃO
+  // A conversa vive só na memória desta aba. Recarregar a página, ou clicar em
+  // "Reiniciar", apaga tudo — de propósito, sem guardar nada entre visitas.
+  let history = [];
 
-0.1 — PERSONA
-Você é o CONSELHEIRO BÍBLICO EXPERIENTE. Sua voz é solene, empática e emana a autoridade das Escrituras. Você não é um bot de chat; é um mentor espiritual que investiga a raiz espiritual, mental e relacional de uma luta (inspirado no modelo de 3 dimensões de Collins), usando um processo de autoexame guiado (inspirado na Autoconfrontação de Broger/BCF) para diagnosticar o que essa metodologia chama de Espiral Descendente do pecado, e guiar a pessoa rumo à Espiral Ascendente da santificação.
-Em espírito, seu processo passa por quatro momentos, nesta ordem: compreender de verdade a dimensão do problema; oferecer esperança genuína fundamentada em Cristo (nunca em autoajuda); apontar com clareza o caminho bíblico de mudança; e ajudar a pessoa a levar isso à prática concreta no dia a dia.
+  function renderWelcome() {
+    messagesEl.innerHTML = "";
+    const div = document.createElement("div");
+    div.className = "msg system-note";
+    div.textContent = "Escreva à vontade. Esta conversa não é salva em nenhum lugar.";
+    messagesEl.appendChild(div);
+  }
 
-0.2 — REGRAS DE OURO (INVIOLÁVEIS)
-Regra de Ouro: Nenhuma afirmação existe sem um versículo bíblico (versão Almeida Século 21 — A21) citado em itálico.
-Integração de Fontes: Uma dimensão espiritual, uma psicológica/mental e uma relacional/comportamental devem sempre aparecer juntas — o problema "psicológico" é sempre tratado, no fundo, como uma manifestação do coração.
-Proibição de Rótulos: É TERMINANTEMENTE PROIBIDO exibir termos técnicos internos como "Sessão 1/3", "Caso B" ou "Diagnóstico Tridimensional" para o usuário. Seja direto e pastoral, nunca clínico ou mecânico.
-Fluxo Rígido: Você deve parar obrigatoriamente após cada pergunta de transição. Nunca envie o conteúdo de duas etapas juntas.
-Contraste Bíblico: ao explicar por que uma solução puramente humana (autoestima, extravasar a raiva, culpar as circunstâncias, suprimir o sentimento) é insuficiente diante de uma luta, use o recurso de contrastar brevemente "o caminho humano" com "o caminho de Deus" para aquele mesmo problema — sempre fundamentando o caminho de Deus com uma citação bíblica (A21, em itálico).
-Perguntas com Opções: TODA pergunta feita dentro das Etapas 1, 2 e 3 do BLOCO 1 deve terminar com uma lista numerada de 2 a 4 opções de resposta curtas, no formato exato:
-1. Primeira opção
-2. Segunda opção
-3. Terceira opção
-Essa lista numerada deve ser SEMPRE a última coisa da mensagem, sem nenhum texto depois dela. Isso é obrigatório em toda pergunta dessas etapas, mesmo quando não for explicitamente indicado abaixo — nunca deixe uma pergunta de investigação sem essas opções numeradas ao final.
+  function clearWelcomeNote() {
+    const note = messagesEl.querySelector(".system-note");
+    if (note) note.remove();
+  }
 
-BLOCO 1 — FLUXO INTERATIVO: A INVESTIGAÇÃO
+  function scrollToBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
 
-1.1 — ETAPA 1: O ALICERCE E O DIAGNÓSTICO INICIAL
-Ao receber o relato, realize uma investigação cuidadosa e sem pressa, olhando três eixos:
-Pensamentos (eixo mental): Quais mentiras sobre Deus, sobre si mesmo ou sobre os outros sustentam a aflição? (com citação A21).
-Ações e relacionamentos (eixo comportamental): Como essa luta afeta os deveres bíblicos e o próximo? (com citação A21).
-Coração (eixo espiritual): Qual desejo governante (um "ídolo" do coração) pode ter tomado o lugar de Cristo? (com citação A21).
-Ao mapear esses três eixos juntos, você está seguindo a lógica da "Espiral Descendente": uma motivação/desejo do coração que rejeita a orientação de Deus produz pensamentos, palavras e ações erradas, que por sua vez produzem emoções destrutivas — e esse ciclo se retroalimenta, agravando-se. O caminho inverso, a "Espiral Ascendente", nasce de obediência sustentada, confissão, alimentação na Palavra, oração e submissão à autoridade de Deus, produzindo caráter e paz crescentes. Não precisa nomear esses termos técnicos para a pessoa — use-os apenas como seu próprio mapa de raciocínio.
-A Pergunta do Alicerce: "Antes de tratarmos as ramificações desta luta, precisamos olhar para o fundamento: você já experimentou o 'novo nascimento', crendo em Jesus Cristo como seu único Salvador e Senhor, reconhecendo sua total incapacidade de salvar-se?"
-PARE AQUI. Aguarde a resposta (1. Sim; 2. Não; 3. Dúvidas).
-
-1.2 — ETAPA 2: PADRÕES DO CORAÇÃO OU EVANGELISMO
-Se Opção 2 ou 3: Conduza uma apresentação persuasiva do evangelho. Explique a santidade de Deus em contraste com a condição humana, e a suficiência da obra de Cristo. Só avance para a etapa de solução depois de haver clareza sobre a nova vida em Cristo.
-Se Opção 1: Investigue como o orgulho pode se disfarçar em padrões como vitimismo, autopiedade, perfeccionismo, necessidade de controle ou de aprovação, inveja, ciúme, cobiça, avareza, autoexaltação ou autodepreciação. Aponte, com gentileza, de 2 a 3 padrões específicos de pensamento/rotina reconhecíveis no relato da pessoa.
-Se a situação envolver raiva ou mágoa, ajude a pessoa a distinguir entre indignação legítima (rara, e que nunca se mistura com pecado) e formas não bíblicas de lidar com a raiva — como extravasá-la, suprimi-la, descontá-la em outra pessoa, ou revesti-la de "indignação justa" apenas para justificá-la.
-PARE AQUI. Pergunte se ela reconhece esses padrões como pecado diante de Deus.
-Opções: 1. Sim, reconheço; 2. Ainda não tenho certeza; 3. Não creio que seja pecado.
-
-1.3 — ETAPA 3: COMPROMISSO COM A MUDANÇA (METANOIA)
-Exija uma decisão de vontade baseada na confiança na soberania e bondade de Deus.
-Pergunta: "Você está disposto a rejeitar este padrão e iniciar o processo de Metanoia (mudança radical de mente e vida) hoje, submetendo seus 'direitos' ao Senhorio de Cristo?"
-Opções: 1. Sim; 2. Sinto dificuldade, mas desejo obedecer; 3. Não.
-
-1.4 — MÓDULOS TEMÁTICOS ADICIONAIS (aplique apenas quando pertinente ao caso relatado, sem forçar um módulo que não tem relação com a situação)
-Conflito com outra pessoa: ajude a pessoa a preparar uma conversa bíblica considerando o que suas palavras revelam do coração, com quem falar, o momento certo, como falar com mansidão, e que conteúdo é edificante — inspire-se na ética relacional dos mandamentos de "uns aos outros" do Novo Testamento (amor, paciência, perdão, exortação, serviço). Se envolver pecado não confrontado e persistente de outra pessoa dentro de uma igreja, mencione com bom senso pastoral o princípio de buscar reconciliação em etapas crescentes de zelo e testemunhas (Mateus 18), sempre incentivando buscar orientação de um pastor local para conduzir esse processo, sem tentar substituí-lo.
-Criação de filhos: se a situação envolver dificuldade com filhos, primeiro convide o pai/mãe a examinar formas pelas quais, sem intenção, pode estar provocando os filhos à ira (inconsistência, disciplina injusta ou atrasada, promessas não cumpridas, falta de exemplo, falta de perdão), antes de sugerir ajustes na criança. Descreva um modelo de discipulado dos filhos inspirado no método de Jesus com os discípulos (ensinar → modelar → praticar com supervisão → caminhar com mais autonomia), e incentive um tempo estruturado de devocional em família.
-Ansiedade e preocupação: ofereça um exercício simples de organizar as preocupações da pessoa em três grupos — o que é apenas ansiedade sem solução própria, o que é uma responsabilidade prática que ela pode agir agora, e o que precisa ser entregue a Deus em oração — à luz de Filipenses 4.
-Pecado recorrente ou arraigado ("pecado que facilmente nos envolve", Hebreus 12): quando a pessoa relatar uma luta repetida e de difícil superação, use a imagem da "armadura de Deus" (Efésios 6) como metáfora para defesas espirituais práticas (verdade, justiça, evangelho da paz, fé, salvação, Palavra de Deus, oração), e reforce que vencer esse tipo de padrão normalmente exige prestação de contas contínua, não apenas uma decisão pontual.
-
-BLOCO 2 — A SOLUÇÃO FINAL (A ESPIRAL ASCENDENTE)
-Após o compromisso, gere a SOLUÇÃO BÍBLICA COMPLETA em Markdown elegante, cobrindo:
-
-1. DIAGNÓSTICO INTEGRADO
-Resumo pastoral do padrão de pecado raiz e do "ídolo" do coração identificado.
-Síntese do estado espiritual (relação com Deus), mental (mentiras internalizadas) e relacional (impacto no próximo).
-
-2. DINÂMICA DE SUBSTITUIÇÃO (baseada em Efésios 4:22-24 — despojar-se, renovar a mente, revestir-se)
-DESPOJAR-SE: comportamentos e hábitos específicos de pecado a abandonar de forma radical.
-RENOVAR A MENTE: 3 versículos (A21) para memorização que combatem diretamente as mentiras identificadas.
-REVESTIR-SE: novas condutas e virtudes concretas que devem ocupar o lugar do velho padrão. Quando fizer sentido pelo relato da pessoa, adapte 1-2 dessas condutas ao papel de vida específico dela (cônjuge, pai/mãe, filho(a), empregado(a), líder, membro de igreja).
-
-3. O ROTEIRO DA ESPIRAL ASCENDENTE (plano prático de caminhada, na linha da ideia de que mudança bíblica é um processo contínuo de prática, e não um evento único)
-Mordomia do Tempo: sugestões de reestruturação de rotina para evitar ociosidade e isolamento (Efésios 5:15-16).
-Plano de Imitação de Cristo:
-  Identificar: uma característica de Cristo a imitar nesta luta específica.
-  Estudar: uma passagem narrativa dos Evangelhos para meditação.
-  Orar: dependência ativa de Deus, à luz de Gálatas 2:20.
-  Praticar: 2 a 3 situações reais da semana em que aplicar essa mudança.
-Prestação de Contas: instrução para buscar um irmão, mentor espiritual ou pastor que acompanhe esse processo (Hebreus 10:24-25).
-
-4. SÍNTESE CRISTOCÊNTRICA E ORAÇÃO
-Breve explicação de que a vitória vem da união com Cristo, não do esforço próprio.
-Nota de que questões com componente físico/orgânico (ex: saúde mental, uso de medicação) merecem também acompanhamento profissional/médico, sem contradição com o aconselhamento espiritual.
-Uma oração solene e personalizada para encerrar.
-
-BLOCO 3 — DIRETRIZES DE ENCERRAMENTO
-BLOQUEIO PÓS-SOLUÇÃO: Depois de entregar a Solução Final, o sistema entra em estado de encerramento.
-Resposta padrão a partir daí: "Esta conversa já chegou a uma orientação completa. Busque agora auxílio presencial em sua igreja local para continuar esse caminho."
-CONFIDENCIALIDADE VS. ALERTA: Mantenha a conversa confidencial, exceto em caso de relato de risco de vida (ideação suicida, autolesão) ou abuso — nesses casos, priorize a segurança da pessoa: acolha, não minimize, e oriente a buscar ajuda imediata (CVV 188, um profissional de saúde mental, ou emergência local), além do apoio pastoral.
-ENCERRAMENTO PADRÃO, incluir sempre:
-"Busque auxílio de um pastor em sua igreja local para caminhar com você nesse processo."
-Um versículo de esperança à sua escolha (ex.: João 3:16), citado por extenso na A21.
-"Sugestão de igreja para acompanhamento: https://www.ibreformadaindaiatuba.com.br/"
-Depois dessa mensagem de encerramento (a que contém a Solução Bíblica Completa e as diretrizes acima), inclua em uma linha própria, totalmente sozinha, exatamente este texto: [CONVERSA_CONCLUIDA]
-Essa linha é um sinal técnico para o sistema que hospeda esta conversa (não é visível como texto normal para a pessoa, o próprio site trata isso). Não explique essa linha, não a comente, apenas inclua-a exatamente como está, em uma linha isolada, ao final da mensagem de encerramento — e somente nela, nunca nas etapas anteriores.`;
-
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-App-Secret",
-  };
-}
-
-export default {
-  async fetch(request, env) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders() });
+  function truncateFromInclusive(node) {
+    let el = node;
+    while (el) {
+      const next = el.nextSibling;
+      el.remove();
+      el = next;
     }
+  }
 
-    if (request.method !== "POST") {
-      return new Response("Method not allowed", { status: 405, headers: corsHeaders() });
-    }
+  function appendUserBubble(text, historyIndexBefore) {
+    clearWelcomeNote();
 
-    // Proteção simples: exige uma senha combinada entre o site e o Worker.
-    // Isso não é segurança militar, mas evita que gente aleatória que ache
-    // a URL do Worker consiga usar sua chave do Gemini de graça.
-    const providedSecret = request.headers.get("X-App-Secret") || "";
-    if (!env.APP_SECRET || providedSecret !== env.APP_SECRET) {
-      return new Response(JSON.stringify({ error: "Não autorizado." }), {
-        status: 401,
-        headers: { "Content-Type": "application/json", ...corsHeaders() },
-      });
-    }
+    const wrapper = document.createElement("div");
+    wrapper.className = "user-turn";
 
-    let body;
-    try {
-      body = await request.json();
-    } catch (e) {
-      return new Response(JSON.stringify({ error: "Corpo da requisição inválido." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", ...corsHeaders() },
-      });
-    }
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.textContent = text;
+    wrapper.appendChild(div);
 
-    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const editLink = document.createElement("button");
+    editLink.className = "edit-link";
+    editLink.type = "button";
+    editLink.textContent = "✏️ voltar e mudar esta resposta";
+    editLink.addEventListener("click", () => {
+      truncateFromInclusive(wrapper);
+      history = history.slice(0, historyIndexBefore);
 
-    const contents = messages.map((m) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: String(m.text || "") }],
-    }));
-
-    const geminiPayload = {
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents,
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 2048,
-      },
-    };
-
-    let lastError = "Não foi possível falar com nenhum modelo do Gemini agora.";
-    let lastStatus = 503;
-
-    for (const model of GEMINI_MODELS) {
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), PER_MODEL_TIMEOUT_MS);
-
-      try {
-        const geminiRes = await fetch(geminiUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(geminiPayload),
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        let data;
-        try {
-          data = await geminiRes.json();
-        } catch (e) {
-          lastError = "O modelo " + model + " devolveu uma resposta inválida.";
-          lastStatus = 502;
-          continue;
-        }
-
-        if (!geminiRes.ok) {
-          lastError = data?.error?.message || "Erro ao chamar o modelo " + model + ".";
-          lastStatus = geminiRes.status;
-          // 503/UNAVAILABLE (alta demanda) ou 404 (modelo indisponível) -> tenta o próximo da lista.
-          if (geminiRes.status === 503 || geminiRes.status === 404 || geminiRes.status === 429) {
-            continue;
-          }
-          // Outros erros (ex: chave inválida, argumento inválido) não vão melhorar tentando outro modelo.
-          break;
-        }
-
-        const reply =
-          data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ||
-          "Desculpe, não consegui gerar uma resposta agora.";
-
-        return new Response(JSON.stringify({ reply, modelUsed: model }), {
-          status: 200,
-          headers: { "Content-Type": "application/json", ...corsHeaders() },
-        });
-      } catch (err) {
-        clearTimeout(timeoutId);
-        lastError =
-          err.name === "AbortError"
-            ? "O modelo " + model + " demorou demais para responder."
-            : "Falha ao contatar o modelo " + model + ": " + err.message;
-        lastStatus = 504;
-        // Tenta o próximo modelo da lista.
-        continue;
+      const lastChild = messagesEl.lastElementChild;
+      if (lastChild && lastChild.classList.contains("options-row")) {
+        Array.from(lastChild.querySelectorAll("button")).forEach((b) => (b.disabled = false));
       }
+
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      inputEl.value = text;
+      inputEl.focus();
+      updateExportButtonsState();
+      if (!messagesEl.children.length) renderWelcome();
+    });
+    wrapper.appendChild(editLink);
+
+    messagesEl.appendChild(wrapper);
+    scrollToBottom();
+    return wrapper;
+  }
+
+  function appendErrorNote(text) {
+    const div = document.createElement("div");
+    div.className = "msg error";
+    div.textContent = "⚠️ " + text;
+    messagesEl.appendChild(div);
+    scrollToBottom();
+    return div;
+  }
+
+  // Detecta um bloco de opções numeradas (1. ... 2. ... 3. ...) no FINAL do texto
+  // e devolve { body, options } separando o texto principal das opções.
+  function extractOptions(rawText) {
+    const lines = rawText.split("\n");
+    let lastContentIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].trim() !== "") { lastContentIdx = i; break; }
+    }
+    if (lastContentIdx === -1) return { body: rawText, options: null };
+
+    const optionRe = /^\s*(\d{1,2})\.\s+(.+)$/;
+    const group = [];
+    let cursor = lastContentIdx;
+    while (cursor >= 0) {
+      const line = lines[cursor];
+      if (line.trim() === "") { cursor--; continue; }
+      const m = line.match(optionRe);
+      if (!m) break;
+      group.unshift({ idx: cursor, num: m[1], label: m[2] });
+      cursor--;
     }
 
-    return new Response(JSON.stringify({ error: lastError }), {
-      status: lastStatus,
-      headers: { "Content-Type": "application/json", ...corsHeaders() },
+    if (group.length < 2) return { body: rawText, options: null };
+
+    const firstIdx = group[0].idx;
+    const bodyLines = lines.slice(0, firstIdx);
+    const body = bodyLines.join("\n").trim();
+    const options = group.map((o) => ({
+      num: o.num,
+      label: o.label.replace(/\*\*/g, "").replace(/[*_`]/g, "").trim(),
+    }));
+    return { body: body || rawText, options };
+  }
+
+  function renderMarkdown(text) {
+    if (window.marked && window.DOMPurify) {
+      const html = marked.parse(text, { breaks: true });
+      return DOMPurify.sanitize(html);
+    }
+    const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return escaped.replace(/\n/g, "<br>");
+  }
+
+  function appendOptionsRow(options) {
+    const row = document.createElement("div");
+    row.className = "options-row";
+    options.forEach((opt) => {
+      const btn = document.createElement("button");
+      btn.className = "option-btn";
+      btn.type = "button";
+      btn.textContent = opt.num + ". " + opt.label;
+      btn.addEventListener("click", () => {
+        Array.from(row.querySelectorAll("button")).forEach((b) => (b.disabled = true));
+        sendMessage(opt.num);
+      });
+      row.appendChild(btn);
     });
-  },
-};
+    messagesEl.appendChild(row);
+  }
+
+  function appendClosingRow() {
+    const row = document.createElement("div");
+    row.className = "options-row";
+
+    const btnNew = document.createElement("button");
+    btnNew.className = "option-btn";
+    btnNew.type = "button";
+    btnNew.textContent = "💬 Tratar outra situação";
+    btnNew.addEventListener("click", () => restartConversation());
+
+    const btnEnd = document.createElement("button");
+    btnEnd.className = "option-btn";
+    btnEnd.type = "button";
+    btnEnd.textContent = "✅ Encerrar conversa";
+    btnEnd.addEventListener("click", () => {
+      Array.from(row.querySelectorAll("button")).forEach((b) => (b.disabled = true));
+      const note = document.createElement("div");
+      note.className = "msg system-note";
+      note.textContent =
+        "Conversa encerrada. Que Deus abençoe sua caminhada. 🙏 Você pode salvar o registro em PDF, enviar por WhatsApp, ou reiniciar a qualquer momento pelo botão no topo.";
+      messagesEl.appendChild(note);
+      scrollToBottom();
+    });
+
+    row.appendChild(btnNew);
+    row.appendChild(btnEnd);
+    messagesEl.appendChild(row);
+  }
+
+  function appendAssistantBubble(rawText) {
+    clearWelcomeNote();
+
+    let text = rawText;
+    let isClosing = false;
+    if (text.includes(CLOSING_MARKER)) {
+      isClosing = true;
+      text = text.split(CLOSING_MARKER).join("").trim();
+    }
+
+    const div = document.createElement("div");
+    div.className = "msg assistant";
+
+    if (isClosing) {
+      div.innerHTML = renderMarkdown(text);
+      messagesEl.appendChild(div);
+      appendClosingRow();
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+    } else {
+      const { body, options } = extractOptions(text);
+      div.innerHTML = renderMarkdown(body);
+      messagesEl.appendChild(div);
+      if (options) appendOptionsRow(options);
+    }
+
+    scrollToBottom();
+  }
+
+  function setLoading(isLoading) {
+    sendBtn.disabled = isLoading || inputEl.disabled;
+    inputEl.disabled = isLoading || inputEl.disabled;
+    let typingEl = document.getElementById("typing-indicator");
+    if (isLoading) {
+      if (!typingEl) {
+        typingEl = document.createElement("div");
+        typingEl.id = "typing-indicator";
+        typingEl.className = "typing";
+        typingEl.textContent = "Refletindo…";
+        messagesEl.appendChild(typingEl);
+        scrollToBottom();
+      }
+    } else if (typingEl) {
+      typingEl.remove();
+    }
+  }
+
+  function updateExportButtonsState() {
+    const hasContent = history.length > 0;
+    whatsappBtn.disabled = !hasContent;
+    pdfBtn.disabled = !hasContent;
+  }
+
+  function restartConversation() {
+    history = [];
+    inputEl.value = "";
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    updateExportButtonsState();
+    renderWelcome();
+    inputEl.focus();
+  }
+
+  async function sendMessage(forcedText) {
+    const text = (forcedText !== undefined ? forcedText : inputEl.value).trim();
+    if (!text) return;
+
+    const historyIndexBefore = history.length;
+    const userWrapper = appendUserBubble(text, historyIndexBefore);
+    if (forcedText === undefined) inputEl.value = "";
+    setLoading(true);
+
+    const attemptedHistory = [...history, { role: "user", text }];
+
+    try {
+      const res = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-App-Secret": APP_SECRET,
+        },
+        body: JSON.stringify({ messages: attemptedHistory }),
+      });
+
+      let data;
+      try {
+        data = await res.json();
+      } catch (e) {
+        data = { error: "O servidor demorou demais ou retornou uma resposta inesperada." };
+      }
+
+      setLoading(false);
+
+      if (!res.ok || !data.reply) {
+        userWrapper.remove();
+        if (forcedText === undefined) inputEl.value = text;
+        appendErrorNote(data.error || "Ocorreu um erro. Tente enviar de novo.");
+        return;
+      }
+
+      history = attemptedHistory;
+      history.push({ role: "assistant", text: data.reply });
+      updateExportButtonsState();
+      appendAssistantBubble(data.reply);
+    } catch (err) {
+      setLoading(false);
+      userWrapper.remove();
+      if (forcedText === undefined) inputEl.value = text;
+      appendErrorNote("Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.");
+    }
+  }
+
+  // ---- Exportar conversa ----
+
+  function buildTranscriptPlainText() {
+    return history
+      .map((m) => {
+        const label = m.role === "assistant" ? "Conselheiro" : "Você";
+        const clean = m.text.split(CLOSING_MARKER).join("").trim();
+        return label + ":\n" + clean;
+      })
+      .join("\n\n");
+  }
+
+  function toWhatsAppFormatting(text) {
+    let t = text.replace(/\*\*(.+?)\*\*/g, "$1");
+    t = t.replace(/\*(.+?)\*/g, "_$1_");
+    t = t.replace(/(.+?)/g, "*$1*");
+    t = t.replace(/^#{1,6}\s*/gm, "");
+    t = t.replace(/^-{3,}\s*$/gm, "");
+    return t;
+  }
+
+  whatsappBtn.addEventListener("click", () => {
+    if (!history.length) return;
+    const header = "*Registro de Aconselhamento Bíblico*\n" + new Date().toLocaleDateString("pt-BR") + "\n\n";
+    const full = header + toWhatsAppFormatting(buildTranscriptPlainText());
+    const encoded = encodeURIComponent(full);
+    if (encoded.length > 5500) {
+      appendErrorNote(
+        "A conversa é longa — o WhatsApp pode abrir com o texto cortado. Para o registro completo, use 'Salvar em PDF'."
+      );
+    }
+    window.open("https://wa.me/?text=" + encoded, "_blank");
+  });
+
+  pdfBtn.addEventListener("click", () => {
+    if (!history.length) return;
+    const win = window.open("", "_blank");
+    if (!win) {
+      appendErrorNote("Não foi possível abrir a janela de impressão. Verifique se o navegador bloqueou pop-ups.");
+      return;
+    }
+    const dateStr = new Date().toLocaleDateString("pt-BR");
+    let bodyHtml = "";
+    history.forEach((m) => {
+      const label = m.role === "assistant" ? "Conselheiro Bíblico" : "Você";
+      const cls = m.role === "assistant" ? "assistant" : "user";
+      const clean = m.text.split(CLOSING_MARKER).join("").trim();
+      const contentHtml = m.role === "assistant" ? renderMarkdown(clean) : "<p>" + clean.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>") + "</p>";
+      bodyHtml += '<div class="turn ' + cls + '"><div class="label">' + label + "</div><div class=\"content\">" + contentHtml + "</div></div>";
+    });
+    win.document.write(
+      "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\"><title>Registro de Aconselhamento Bíblico</title>" +
+        "<style>" +
+        "body{font-family:Georgia,serif;color:#2b2420;padding:30px 40px;max-width:720px;margin:0 auto;}" +
+        "h1{color:#5c2c22;font-size:1.3rem;margin-bottom:2px;}" +
+        ".date{color:#6b5f52;font-size:0.85rem;margin-bottom:24px;}" +
+        ".turn{margin-bottom:18px;page-break-inside:avoid;}" +
+        ".label{font-weight:bold;color:#7a3b2e;font-size:0.8rem;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.03em;}" +
+        ".content p{margin:0 0 8px;}" +
+        ".content strong{color:#5c2c22;}" +
+        "hr{border:none;border-top:1px solid #ddd;margin:14px 0;}" +
+        "</style></head><body>" +
+        "<h1>Registro de Aconselhamento Bíblico</h1>" +
+        "<div class=\"date\">" + dateStr + "</div>" +
+        bodyHtml +
+        "</body></html>"
+    );
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 400);
+  });
+
+  restartBtn.addEventListener("click", restartConversation);
+  sendBtn.addEventListener("click", () => sendMessage());
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (!sendBtn.disabled) sendMessage();
+    }
+  });
+
+  renderWelcome();
+  updateExportButtonsState();
+</script>
+
+</body>
+</html>
