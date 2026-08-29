@@ -4,6 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Aconselhamento Bíblico</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <style>
   :root {
     --bg: #f6f1e7;
@@ -74,14 +76,14 @@
     max-width: 84%;
     padding: 12px 16px;
     border-radius: 14px;
-    line-height: 1.5;
-    white-space: pre-wrap;
+    line-height: 1.55;
     font-size: 0.98rem;
   }
   .msg.user {
     align-self: flex-end;
     background: var(--user-bubble);
     border-bottom-right-radius: 4px;
+    white-space: pre-wrap;
   }
   .msg.assistant {
     align-self: flex-start;
@@ -89,12 +91,26 @@
     border: 1px solid var(--border);
     border-bottom-left-radius: 4px;
   }
+  .msg.assistant p { margin: 0 0 10px; }
+  .msg.assistant p:last-child { margin-bottom: 0; }
+  .msg.assistant h1, .msg.assistant h2, .msg.assistant h3 {
+    color: var(--accent-dark);
+    margin: 14px 0 8px;
+    font-size: 1.05rem;
+  }
+  .msg.assistant h1:first-child, .msg.assistant h2:first-child, .msg.assistant h3:first-child { margin-top: 0; }
+  .msg.assistant strong { color: var(--accent-dark); }
+  .msg.assistant em { color: var(--ink); }
+  .msg.assistant ul, .msg.assistant ol { margin: 6px 0; padding-left: 22px; }
+  .msg.assistant li { margin-bottom: 4px; }
+  .msg.assistant hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
   .msg.error {
-    align-self: flex-start;
+    align-self: center;
     background: #fbeaea;
     border: 1px solid #e6b8b8;
     color: #7a2e2e;
-    border-bottom-left-radius: 4px;
+    font-size: 0.9rem;
+    text-align: center;
   }
   .msg.system-note {
     align-self: center;
@@ -104,6 +120,26 @@
     background: none;
     padding: 4px;
   }
+  #options-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-self: flex-start;
+    max-width: 84%;
+    margin-top: -6px;
+  }
+  .option-btn {
+    background: var(--bg-panel);
+    border: 1.5px solid var(--accent);
+    color: var(--accent-dark);
+    border-radius: 20px;
+    padding: 8px 16px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .option-btn:hover { background: var(--user-bubble); }
+  .option-btn:disabled { opacity: 0.4; cursor: default; }
   #input-row {
     display: flex;
     gap: 10px;
@@ -199,20 +235,104 @@
     messagesEl.appendChild(div);
   }
 
-  function appendBubble(role, text) {
-    // Na primeira mensagem real, remove a nota de boas-vindas.
+  function clearWelcomeNote() {
     const note = messagesEl.querySelector(".system-note");
     if (note) note.remove();
-
-    const div = document.createElement("div");
-    div.className = "msg " + (role === "assistant" ? "assistant" : role === "error" ? "error" : "user");
-    div.textContent = text;
-    messagesEl.appendChild(div);
-    scrollToBottom();
   }
 
   function scrollToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function appendUserBubble(text) {
+    clearWelcomeNote();
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.textContent = text;
+    messagesEl.appendChild(div);
+    scrollToBottom();
+    return div;
+  }
+
+  function appendErrorNote(text) {
+    const div = document.createElement("div");
+    div.className = "msg error";
+    div.textContent = "⚠️ " + text;
+    messagesEl.appendChild(div);
+    scrollToBottom();
+    return div;
+  }
+
+  // Detecta um bloco de opções numeradas (1. ... 2. ... 3. ...) no FINAL do texto
+  // e devolve { body, options } separando o texto principal das opções.
+  function extractOptions(rawText) {
+    const lines = rawText.split("\n");
+    let lastContentIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].trim() !== "") { lastContentIdx = i; break; }
+    }
+    if (lastContentIdx === -1) return { body: rawText, options: null };
+
+    const optionRe = /^\s*(\d{1,2})\.\s+(.+)$/;
+    const group = [];
+    let cursor = lastContentIdx;
+    while (cursor >= 0) {
+      const line = lines[cursor];
+      if (line.trim() === "") { cursor--; continue; }
+      const m = line.match(optionRe);
+      if (!m) break;
+      group.unshift({ idx: cursor, num: m[1], label: m[2] });
+      cursor--;
+    }
+
+    if (group.length < 2) return { body: rawText, options: null };
+
+    const firstIdx = group[0].idx;
+    const bodyLines = lines.slice(0, firstIdx);
+    const body = bodyLines.join("\n").trim();
+    const options = group.map((o) => ({
+      num: o.num,
+      label: o.label.replace(/\*\*/g, "").replace(/[*_`]/g, "").trim(),
+    }));
+    return { body: body || rawText, options };
+  }
+
+  function renderMarkdown(text) {
+    if (window.marked && window.DOMPurify) {
+      const html = marked.parse(text, { breaks: true });
+      return DOMPurify.sanitize(html);
+    }
+    // Sem as bibliotecas (ex: sem internet), mostra o texto puro como reserva.
+    const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return escaped.replace(/\n/g, "<br>");
+  }
+
+  function appendAssistantBubble(rawText) {
+    clearWelcomeNote();
+    const { body, options } = extractOptions(rawText);
+
+    const div = document.createElement("div");
+    div.className = "msg assistant";
+    div.innerHTML = renderMarkdown(body);
+    messagesEl.appendChild(div);
+
+    if (options) {
+      const row = document.createElement("div");
+      row.id = "options-row";
+      options.forEach((opt) => {
+        const btn = document.createElement("button");
+        btn.className = "option-btn";
+        btn.textContent = opt.num + ". " + opt.label;
+        btn.addEventListener("click", () => {
+          Array.from(row.querySelectorAll("button")).forEach((b) => (b.disabled = true));
+          sendMessage(opt.num);
+        });
+        row.appendChild(btn);
+      });
+      messagesEl.appendChild(row);
+    }
+
+    scrollToBottom();
   }
 
   function setLoading(isLoading) {
@@ -233,14 +353,15 @@
     }
   }
 
-  async function sendMessage() {
-    const text = inputEl.value.trim();
+  async function sendMessage(forcedText) {
+    const text = (forcedText !== undefined ? forcedText : inputEl.value).trim();
     if (!text) return;
 
-    history.push({ role: "user", text });
-    appendBubble("user", text);
-    inputEl.value = "";
+    const userBubble = appendUserBubble(text);
+    if (forcedText === undefined) inputEl.value = "";
     setLoading(true);
+
+    const attemptedHistory = [...history, { role: "user", text }];
 
     try {
       const res = await fetch(WORKER_URL, {
@@ -249,35 +370,39 @@
           "Content-Type": "application/json",
           "X-App-Secret": APP_SECRET,
         },
-        body: JSON.stringify({ messages: history }),
+        body: JSON.stringify({ messages: attemptedHistory }),
       });
 
       let data;
       try {
         data = await res.json();
       } catch (e) {
-        data = { error: "O servidor demorou demais ou retornou uma resposta inesperada. Tente novamente em instantes." };
+        data = { error: "O servidor demorou demais ou retornou uma resposta inesperada." };
       }
 
       setLoading(false);
 
       if (!res.ok || !data.reply) {
-        // Remove a última mensagem do usuário do histórico para permitir tentar de novo sem duplicar.
-        history.pop();
-        appendBubble("error", "⚠️ " + (data.error || "Ocorreu um erro. Tente novamente."));
+        // A tentativa falhou: remove a bolha do usuário e devolve o texto para a caixa,
+        // para não ficar acumulando mensagens sem resposta na tela.
+        userBubble.remove();
+        if (forcedText === undefined) inputEl.value = text;
+        appendErrorNote(data.error || "Ocorreu um erro. Tente enviar de novo.");
         return;
       }
 
+      history = attemptedHistory;
       history.push({ role: "assistant", text: data.reply });
-      appendBubble("assistant", data.reply);
+      appendAssistantBubble(data.reply);
     } catch (err) {
       setLoading(false);
-      history.pop();
-      appendBubble("error", "⚠️ Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.");
+      userBubble.remove();
+      if (forcedText === undefined) inputEl.value = text;
+      appendErrorNote("Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.");
     }
   }
 
-  sendBtn.addEventListener("click", sendMessage);
+  sendBtn.addEventListener("click", () => sendMessage());
   inputEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -286,335 +411,6 @@
   });
 
   renderWelcome();
-</script>
-
-</body>
-</html><!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Aconselhamento Bíblico</title>
-<style>
-  :root {
-    --bg: #f6f1e7;
-    --bg-panel: #fffdf8;
-    --ink: #2b2420;
-    --ink-soft: #6b5f52;
-    --accent: #7a3b2e;
-    --accent-dark: #5c2c22;
-    --user-bubble: #eadfc9;
-    --bot-bubble: #ffffff;
-    --border: #e2d6bd;
-  }
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    background: var(--bg);
-    color: var(--ink);
-    font-family: "Georgia", "Iowan Old Style", serif;
-  }
-  body {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-  }
-  header {
-    width: 100%;
-    max-width: 760px;
-    padding: 28px 20px 12px;
-    text-align: center;
-  }
-  header h1 {
-    margin: 0 0 6px;
-    font-size: 1.6rem;
-    color: var(--accent-dark);
-    letter-spacing: 0.02em;
-  }
-  header p {
-    margin: 0;
-    color: var(--ink-soft);
-    font-size: 0.95rem;
-  }
-  #chat-container {
-    width: 100%;
-    max-width: 760px;
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    margin: 10px 16px 16px;
-    overflow: hidden;
-    box-shadow: 0 4px 18px rgba(90, 60, 30, 0.08);
-  }
-  #messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    min-height: 300px;
-    max-height: 62vh;
-  }
-  .msg {
-    max-width: 84%;
-    padding: 12px 16px;
-    border-radius: 14px;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    font-size: 0.98rem;
-  }
-  .msg.user {
-    align-self: flex-end;
-    background: var(--user-bubble);
-    border-bottom-right-radius: 4px;
-  }
-  .msg.assistant {
-    align-self: flex-start;
-    background: var(--bot-bubble);
-    border: 1px solid var(--border);
-    border-bottom-left-radius: 4px;
-  }
-  .msg.system-note {
-    align-self: center;
-    color: var(--ink-soft);
-    font-style: italic;
-    font-size: 0.85rem;
-    background: none;
-    padding: 4px;
-  }
-  #input-row {
-    display: flex;
-    gap: 10px;
-    padding: 14px;
-    border-top: 1px solid var(--border);
-    background: var(--bg-panel);
-  }
-  #input-row textarea {
-    flex: 1;
-    resize: none;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 10px 12px;
-    font-family: inherit;
-    font-size: 0.98rem;
-    min-height: 44px;
-    max-height: 140px;
-    background: #fffefb;
-    color: var(--ink);
-  }
-  #input-row textarea:focus {
-    outline: 2px solid var(--accent);
-  }
-  #send-btn {
-    background: var(--accent);
-    color: #fff;
-    border: none;
-    border-radius: 10px;
-    padding: 0 20px;
-    font-size: 0.95rem;
-    cursor: pointer;
-    font-family: inherit;
-  }
-  #send-btn:hover { background: var(--accent-dark); }
-  #send-btn:disabled { opacity: 0.5; cursor: default; }
-  footer {
-    max-width: 760px;
-    padding: 0 20px 24px;
-    text-align: center;
-    color: var(--ink-soft);
-    font-size: 0.78rem;
-  }
-  #reset-row {
-    text-align: center;
-    padding: 6px 0 0;
-  }
-  #reset-btn {
-    background: none;
-    border: none;
-    color: var(--ink-soft);
-    text-decoration: underline;
-    cursor: pointer;
-    font-family: inherit;
-    font-size: 0.8rem;
-  }
-  .typing {
-    align-self: flex-start;
-    color: var(--ink-soft);
-    font-style: italic;
-    font-size: 0.9rem;
-    padding: 4px 4px;
-  }
-</style>
-</head>
-<body>
-
-<header>
-  <h1>Aconselhamento Bíblico</h1>
-  <p>Escreva sua situação e você será ajudado(a) por meio do aconselhamento bíblico cristocêntrico.</p>
-</header>
-
-<div id="chat-container">
-  <div id="messages"></div>
-  <div id="input-row">
-    <textarea id="user-input" placeholder="Escreva aqui o que você está enfrentando…" rows="2"></textarea>
-    <button id="send-btn">Enviar</button>
-  </div>
-</div>
-
-<div id="reset-row">
-  <button id="reset-btn">Começar uma nova conversa</button>
-</div>
-
-<footer>
-  Este app é uma ferramenta de apoio e reflexão à luz das Escrituras. Ele não substitui o
-  acompanhamento pastoral presencial, aconselhamento profissional, nem atendimento em situações
-  de crise ou risco. Em emergência, procure ajuda imediata de um profissional ou de sua igreja local.
-</footer>
-
-<script>
-  // ====== CONFIGURAÇÃO — edite estas duas linhas antes de publicar ======
-  const WORKER_URL = "https://aconselhamento-biblico.lana-lopes-psicopedagoga.workers.dev";
-  const APP_SECRET = "biblico2026";
-  // ========================================================================
-
-  const STORAGE_KEY = "aconselhamento_biblico_historico";
-
-  const messagesEl = document.getElementById("messages");
-  const inputEl = document.getElementById("user-input");
-  const sendBtn = document.getElementById("send-btn");
-  const resetBtn = document.getElementById("reset-btn");
-
-  let history = [];
-
-  function loadHistory() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      history = raw ? JSON.parse(raw) : [];
-    } catch (e) {
-      history = [];
-    }
-  }
-
-  function saveHistory() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
-    } catch (e) {}
-  }
-
-  function renderAll() {
-    messagesEl.innerHTML = "";
-    if (history.length === 0) {
-      addSystemNote("Escreva à vontade. Esta conversa fica só no seu navegador.");
-      return;
-    }
-    history.forEach((m) => appendBubble(m.role, m.text));
-    scrollToBottom();
-  }
-
-  function appendBubble(role, text) {
-    const div = document.createElement("div");
-    div.className = "msg " + (role === "assistant" ? "assistant" : "user");
-    div.textContent = text;
-    messagesEl.appendChild(div);
-  }
-
-  function addSystemNote(text) {
-    const div = document.createElement("div");
-    div.className = "msg system-note";
-    div.textContent = text;
-    messagesEl.appendChild(div);
-  }
-
-  function scrollToBottom() {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
-
-  function setLoading(isLoading) {
-    sendBtn.disabled = isLoading;
-    inputEl.disabled = isLoading;
-    let typingEl = document.getElementById("typing-indicator");
-    if (isLoading) {
-      if (!typingEl) {
-        typingEl = document.createElement("div");
-        typingEl.id = "typing-indicator";
-        typingEl.className = "typing";
-        typingEl.textContent = "Refletindo…";
-        messagesEl.appendChild(typingEl);
-        scrollToBottom();
-      }
-    } else if (typingEl) {
-      typingEl.remove();
-    }
-  }
-
-  async function sendMessage() {
-    const text = inputEl.value.trim();
-    if (!text) return;
-
-    if (WORKER_URL.includes("COLE_AQUI")) {
-      appendBubble("assistant", "⚠️ Este app ainda não foi configurado: falta colocar a URL do Worker e a senha no início do arquivo index.html.");
-      return;
-    }
-
-    history.push({ role: "user", text });
-    appendBubble("user", text);
-    inputEl.value = "";
-    saveHistory();
-    scrollToBottom();
-    setLoading(true);
-
-    try {
-      const res = await fetch(WORKER_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-App-Secret": APP_SECRET,
-        },
-        body: JSON.stringify({ messages: history }),
-      });
-
-      const data = await res.json();
-      setLoading(false);
-
-      if (!res.ok) {
-        appendBubble("assistant", "⚠️ " + (data.error || "Ocorreu um erro ao falar com o servidor."));
-        return;
-      }
-
-      history.push({ role: "assistant", text: data.reply });
-      appendBubble("assistant", data.reply);
-      saveHistory();
-      scrollToBottom();
-    } catch (err) {
-      setLoading(false);
-      appendBubble("assistant", "⚠️ Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.");
-    }
-  }
-
-  sendBtn.addEventListener("click", sendMessage);
-  inputEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  });
-
-  resetBtn.addEventListener("click", () => {
-    if (confirm("Tem certeza que deseja apagar esta conversa e começar uma nova?")) {
-      history = [];
-      saveHistory();
-      renderAll();
-    }
-  });
-
-  loadHistory();
-  renderAll();
 </script>
 
 </body>
