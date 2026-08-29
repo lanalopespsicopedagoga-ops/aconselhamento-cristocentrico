@@ -331,13 +331,34 @@
     return wrapper;
   }
 
-  function appendErrorNote(text) {
+  function appendErrorNote(text, retryText) {
+    const wrapper = document.createElement("div");
+    wrapper.style.display = "flex";
+    wrapper.style.flexDirection = "column";
+    wrapper.style.alignItems = "center";
+    wrapper.style.gap = "6px";
+    wrapper.style.alignSelf = "center";
+
     const div = document.createElement("div");
     div.className = "msg error";
     div.textContent = "⚠️ " + text;
-    messagesEl.appendChild(div);
+    wrapper.appendChild(div);
+
+    if (retryText !== undefined) {
+      const retryBtn = document.createElement("button");
+      retryBtn.className = "option-btn";
+      retryBtn.type = "button";
+      retryBtn.textContent = "🔁 Tentar novamente";
+      retryBtn.addEventListener("click", () => {
+        wrapper.remove();
+        sendMessage(retryText);
+      });
+      wrapper.appendChild(retryBtn);
+    }
+
+    messagesEl.appendChild(wrapper);
     scrollToBottom();
-    return div;
+    return wrapper;
   }
 
   // Detecta um bloco de opções numeradas (1. ... 2. ... 3. ...) no FINAL do texto
@@ -525,7 +546,7 @@
       if (!res.ok || !data.reply) {
         userWrapper.remove();
         if (forcedText === undefined) inputEl.value = text;
-        appendErrorNote(data.error || "Ocorreu um erro. Tente enviar de novo.");
+        appendErrorNote(data.error || "Ocorreu um erro. Tente enviar de novo.", text);
         return;
       }
 
@@ -537,18 +558,43 @@
       setLoading(false);
       userWrapper.remove();
       if (forcedText === undefined) inputEl.value = text;
-      appendErrorNote("Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.");
+      appendErrorNote("Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.", text);
     }
   }
 
   // ---- Exportar conversa ----
 
+  // Para o relatório (WhatsApp/PDF), não faz sentido repetir a lista de opções
+  // (1. Sim / 2. Não / 3. Dúvidas) — só a opção que a pessoa realmente escolheu.
+  // Esta função limpa a lista de opções de cada pergunta e troca a resposta
+  // numérica ("3") pelo texto da opção escolhida ("Dúvidas"), quando aplicável.
+  function buildExportableHistory() {
+    const result = [];
+    let lastOptions = null;
+    history.forEach((m) => {
+      if (m.role === "assistant") {
+        const clean = m.text.split(CLOSING_MARKER).join("").trim();
+        const { body, options } = extractOptions(clean);
+        result.push({ role: "assistant", text: body });
+        lastOptions = options;
+      } else {
+        let text = m.text;
+        if (lastOptions) {
+          const match = lastOptions.find((o) => o.num === text.trim());
+          if (match) text = match.label;
+        }
+        result.push({ role: "user", text });
+        lastOptions = null;
+      }
+    });
+    return result;
+  }
+
   function buildTranscriptPlainText() {
-    return history
+    return buildExportableHistory()
       .map((m) => {
         const label = m.role === "assistant" ? "Conselheiro" : "Você";
-        const clean = m.text.split(CLOSING_MARKER).join("").trim();
-        return label + ":\n" + clean;
+        return label + ":\n" + m.text;
       })
       .join("\n\n");
   }
@@ -584,11 +630,10 @@
     }
     const dateStr = new Date().toLocaleDateString("pt-BR");
     let bodyHtml = "";
-    history.forEach((m) => {
+    buildExportableHistory().forEach((m) => {
       const label = m.role === "assistant" ? "Conselheiro Bíblico" : "Você";
       const cls = m.role === "assistant" ? "assistant" : "user";
-      const clean = m.text.split(CLOSING_MARKER).join("").trim();
-      const contentHtml = m.role === "assistant" ? renderMarkdown(clean) : "<p>" + clean.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>") + "</p>";
+      const contentHtml = m.role === "assistant" ? renderMarkdown(m.text) : "<p>" + m.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>") + "</p>";
       bodyHtml += '<div class="turn ' + cls + '"><div class="label">' + label + "</div><div class=\"content\">" + contentHtml + "</div></div>";
     });
     win.document.write(
