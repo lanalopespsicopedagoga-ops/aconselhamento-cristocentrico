@@ -697,11 +697,6 @@
     if (!history.length) return;
     const full = buildWhatsAppReportText();
     const encoded = encodeURIComponent(full);
-    if (encoded.length > 5500) {
-      appendErrorNote(
-        "A orientação final é longa — o WhatsApp pode abrir com o texto cortado. Para o registro completo, use 'Salvar em PDF'."
-      );
-    }
     window.open("https://wa.me/?text=" + encoded, "_blank");
   });
 
